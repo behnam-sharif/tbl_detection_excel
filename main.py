@@ -19,14 +19,20 @@ from openpyxl.utils import range_boundaries, get_column_letter
 # except ImportError:
 #     parse_excel_file = None
 
-# Block candidates from block_generation
+# Block candidates and parse tools
 try:
-    from block_generation import generate_block_candidates, BlockCandidate, BBox
-    from parse_tools import get_presence_matrix_for_sheet, bbox_to_excel_range
+    from parse_tools import BBox, BlockCandidate, get_presence_matrix_for_sheet, bbox_to_excel_range
+    from block_generation import generate_block_candidates
 except ImportError:
     generate_block_candidates = None
     BlockCandidate = None
     BBox = None
+
+# Pipeline (table detection)
+try:
+    from pipeline import parse_workbook
+except ImportError:
+    parse_workbook = None
 
 
 def _fallback_parse_excel_file(file_path: str) -> dict:
@@ -67,6 +73,8 @@ if "cleaned_file_path" not in st.session_state:
     st.session_state.cleaned_file_path = None
 if "block_candidates" not in st.session_state:
     st.session_state.block_candidates = {}  # sheet_name -> list of BlockCandidate
+if "table_detection_results" not in st.session_state:
+    st.session_state.table_detection_results = {}  # sheet_name -> list of (BlockCandidate, TableDecision)
 
 st.title("XGEN: Excel BIM Intelligence")
 
@@ -74,7 +82,7 @@ st.title("XGEN: Excel BIM Intelligence")
 st.sidebar.title("Navigation")
 page = st.sidebar.radio(
     "Select Section",
-    ["Upload Excel", "View Sheets", "Block Candidates"],
+    ["Upload Excel", "View Sheets", "Block Candidates", "Table Detection"],
 )
 # Upload Excel Section
 if page == "Upload Excel":
@@ -291,3 +299,124 @@ elif page == "Block Candidates":
                             for i, bc in enumerate(candidates, 1):
                                 excel_range = bbox_to_excel_range(bc.bbox, base_row=base_row, base_col=base_col)
                                 st.markdown(f"**Block {i}:** `{excel_range}` — {bc.n_cells_on} cells, density {bc.density:.2f} ({bc.provenance})")
+
+# Table Detection Section
+elif page == "Table Detection":
+    st.header("Table Detection")
+
+    if not st.session_state.excel_parsed:
+        st.warning("Please upload and parse an Excel file first.")
+    elif parse_workbook is None:
+        st.warning(
+            "Pipeline module not available. Ensure `pipeline.py` and the `parse_tools/` "
+            "package exist in the same folder as `main.py`."
+        )
+    else:
+        try:
+            file_path = (
+                st.session_state.cleaned_file_path
+                or st.session_state.current_file
+            )
+            wb = load_workbook(file_path, data_only=True)
+            sheet_names = [n for n in wb.sheetnames if n != "Shape_Info"]
+            wb.close()
+        except Exception as e:
+            st.error(f"Error loading Excel file: {e}")
+            sheet_names = []
+
+        if not sheet_names:
+            st.warning("No sheets found in the Excel file.")
+        else:
+            st.markdown("#### Pipeline Parameters")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                td_do_bridging = st.checkbox("Bridge small gaps", value=True, key="td_bridging")
+                td_bridging_rows = st.number_input("Bridge gap (rows)", min_value=0, value=2, key="td_bridge_r")
+                td_bridging_cols = st.number_input("Bridge gap (cols)", min_value=0, value=1, key="td_bridge_c")
+            with col2:
+                td_connectivity = st.radio("Connectivity", [4, 8], horizontal=True, key="td_connectivity")
+                td_min_cells = st.number_input("Min cells per block", min_value=1, value=4, key="td_min_cells")
+            with col3:
+                td_max_workers = st.number_input("Max threads", min_value=1, max_value=8, value=4, key="td_workers")
+                td_max_passes = st.number_input("Max framing passes", min_value=1, max_value=5, value=2, key="td_passes")
+
+            if st.button("Run Table Detection", key="td_run_btn"):
+                st.session_state.table_detection_results = {}
+                with st.spinner("Running table detection pipeline..."):
+                    try:
+                        results = parse_workbook(
+                            file_path=file_path,
+                            sheet_names=sheet_names,
+                            max_workers=td_max_workers,
+                            bridging_rows=td_bridging_rows,
+                            bridging_cols=td_bridging_cols,
+                            connectivity=td_connectivity,
+                            min_on_cells=td_min_cells,
+                            do_bridging=td_do_bridging,
+                            max_framing_passes=td_max_passes,
+                        )
+                        st.session_state.table_detection_results = results
+                        total_tables = sum(
+                            1 for sheet_results in results.values()
+                            for _, d in sheet_results if d.action in ("keep", "shrink")
+                        )
+                        st.success(
+                            f"Detection complete: {total_tables} table(s) found across "
+                            f"{len(sheet_names)} sheet(s)."
+                        )
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Pipeline error: {e}")
+
+            st.markdown("---")
+            st.markdown("### Detection Results")
+
+            if not st.session_state.table_detection_results:
+                st.info("Click **Run Table Detection** to analyze all sheets.")
+            else:
+                # Color mapping for actions
+                ACTION_COLORS = {
+                    "keep": "#28a745",     # green
+                    "reject": "#dc3545",   # red
+                    "shrink": "#ffc107",   # yellow
+                    "expand": "#17a2b8",   # blue
+                }
+
+                for sheet_name in sheet_names:
+                    sheet_results = st.session_state.table_detection_results.get(sheet_name, [])
+                    n_tables = sum(1 for _, d in sheet_results if d.action in ("keep", "shrink"))
+                    n_total = len(sheet_results)
+
+                    with st.expander(
+                        f"**{sheet_name}** — {n_tables} table(s) detected ({n_total} blocks evaluated)",
+                        expanded=(n_tables > 0),
+                    ):
+                        if not sheet_results:
+                            st.caption("No blocks found on this sheet.")
+                            continue
+
+                        for i, (block, decision) in enumerate(sheet_results, 1):
+                            color = ACTION_COLORS.get(decision.action, "#6c757d")
+                            action_badge = (
+                                f'<span style="background-color:{color};color:white;'
+                                f'padding:2px 8px;border-radius:4px;font-size:0.85em;">'
+                                f'{decision.action.upper()}</span>'
+                            )
+
+                            # Show original range
+                            orig_range = bbox_to_excel_range(decision.original_bbox)
+
+                            # Show final range if different
+                            final_info = ""
+                            if decision.final_bbox and decision.final_bbox != decision.original_bbox:
+                                final_range = bbox_to_excel_range(decision.final_bbox)
+                                final_info = f" &rarr; `{final_range}`"
+
+                            st.markdown(
+                                f"**Block {i}:** {action_badge} `{orig_range}`{final_info} "
+                                f"&mdash; {block.n_cells_on} cells, density {block.density:.2f}, "
+                                f"confidence {decision.confidence:.0%} "
+                                f"({block.provenance})",
+                                unsafe_allow_html=True,
+                            )
+                            st.caption(f"Rationale: {decision.rationale}")

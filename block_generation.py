@@ -15,36 +15,14 @@ What this does
 1) Finds contiguous "1" regions (connected components) → initial bboxes
 2) (Optional) Bridges small gaps so sparse tables aren't fragmented
 3) Expands bboxes to include nearby header/title only rows and label columns
-4) export to main.py
+
 """
 
 from __future__ import annotations
-from dataclasses import dataclass
 from typing import List, Tuple, Iterable, Optional, Callable, Dict
 from collections import deque
 
-@dataclass
-class BBox:
-    r1: int  # inclusive
-    c1: int  # inclusive
-    r2: int  # inclusive
-    c2: int  # inclusive
-
-    def clip(self, nrows: int, ncols: int) -> "BBox":
-        return BBox(
-            max(0, self.r1), max(0, self.c1),
-            min(nrows - 1, self.r2), min(ncols - 1, self.c2)
-        )
-
-    def area(self) -> int:
-        return (self.r2 - self.r1 + 1) * (self.c2 - self.c1 + 1)
-
-@dataclass
-class BlockCandidate:
-    bbox: BBox
-    n_cells_on: int
-    density: float
-    provenance: str  # e.g., "cc", "cc+bridge", "cc+expand"
+from parse_tools.models import BBox, BlockCandidate
 
 # -----------------------------
 # Optional gap-bridging helpers
@@ -242,7 +220,7 @@ def expand_bbox_for_context(P: List[List[int]],
 def generate_block_candidates(sheet_id: str,
                               presence_matrix: List[List[int]],
                               do_bridging: bool = True,
-                              bridging_rows: int = 1,
+                              bridging_rows: int = 2,
                               bridging_cols: int = 1,
                               connectivity: int = 4,
                               min_on_cells: int = 4) -> List[BlockCandidate]:
@@ -284,7 +262,8 @@ def generate_block_candidates(sheet_id: str,
             bbox=expanded,
             n_cells_on=on_in_box,
             density=density,
-            provenance=prov
+            provenance=prov,
+            sheet_name=sheet_id,
         ))
 
     return candidates
@@ -307,7 +286,7 @@ def run_for_workbook(sheet_ids: List[str],
             sheet_id=sid,
             presence_matrix=P,
             do_bridging=True,
-            bridging_rows=1,
+            bridging_rows=2,
             bridging_cols=1,
             connectivity=4,
             min_on_cells=4

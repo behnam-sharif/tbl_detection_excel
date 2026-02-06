@@ -14,7 +14,8 @@ What this does
 --------------
 1) Finds contiguous "1" regions (connected components) → initial bboxes
 2) (Optional) Bridges small gaps so sparse tables aren't fragmented
-3) Expands bboxes to include nearby header/title rows and label columns
+3) Expands bboxes to include nearby header/title only rows and label columns
+4) export to main.py
 """
 
 from __future__ import annotations

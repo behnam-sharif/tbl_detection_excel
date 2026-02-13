@@ -4,6 +4,7 @@ pipeline.py — Top-level orchestrator for the table detection pipeline.
 Provides:
   - process_single_sheet(): full pipeline for one sheet
   - parse_workbook(): parallel processing across sheets via ThreadPoolExecutor
+  - Add this 
 """
 
 from __future__ import annotations

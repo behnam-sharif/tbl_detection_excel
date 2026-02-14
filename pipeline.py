@@ -16,11 +16,12 @@ from typing import List, Tuple, Dict, Optional
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 
-from parse_tools.models import BBox, BlockCandidate, TableDecision
+from parse_tools.models import BBox, BlockCandidate, TableDecision, Config
 from parse_tools.sheet_accessor import SheetAccessor
 from parse_tools.presence import get_presence_matrix_from_accessor
 from block_generation import generate_block_candidates
 from table_framing_heuristics import run_framing_pipeline
+from grammar_heuristics import run_grammar_splitting
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +81,7 @@ def process_single_sheet(
     min_on_cells: int = 4,
     do_bridging: bool = True,
     max_framing_passes: int = 2,
+    config: Optional[Config] = None,
 ) -> List[Tuple[BlockCandidate, TableDecision]]:
     """
     Full pipeline for one sheet:
@@ -125,7 +127,24 @@ def process_single_sheet(
                 base_row=1,
                 base_col=1,
                 max_passes=max_framing_passes,
+                config=config,
             )
+
+            # Grammar-based splitting
+            t3 = time.perf_counter()
+            results, cut_candidates = run_grammar_splitting(
+                results, accessor, presence, config=config,
+                base_row=1, base_col=1,
+            )
+            t4 = time.perf_counter()
+            grammar_splits = sum(
+                1 for _, d in results if "+grammar_split" in (d.metadata.get("provenance", ""))
+            )
+            if grammar_splits:
+                logger.info(
+                    "Sheet '%s': grammar splitting produced %d new sub-blocks in %dms",
+                    sheet_name, grammar_splits, int((t4 - t3) * 1000),
+                )
 
             # Log summary
             action_counts: Dict[str, int] = {}
@@ -173,6 +192,7 @@ def parse_workbook(
     file_path: str,
     sheet_names: Optional[List[str]] = None,
     max_workers: int = 4,
+    config: Optional[Config] = None,
     **pipeline_kwargs,
 ) -> Dict[str, List[Tuple[BlockCandidate, TableDecision]]]:
     """
@@ -202,7 +222,7 @@ def parse_workbook(
     with ThreadPoolExecutor(max_workers=effective_workers) as executor:
         future_to_sheet = {
             executor.submit(
-                process_single_sheet, file_path, sn, **pipeline_kwargs
+                process_single_sheet, file_path, sn, config=config, **pipeline_kwargs
             ): sn
             for sn in sheet_names
         }

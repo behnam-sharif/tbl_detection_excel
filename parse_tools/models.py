@@ -6,7 +6,7 @@ All dataclasses used across modules are defined here to avoid circular imports.
 
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import List, Dict, Tuple, Optional, Literal
+from typing import Any, List, Dict, Tuple, Optional, Literal
 
 
 @dataclass
@@ -82,3 +82,67 @@ class TableDecision:
     original_bbox: BBox
     final_bbox: Optional[BBox] = None  # None if reject
     confidence: float = 0.5
+    signal_scores: Dict[str, float] = field(default_factory=dict)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class Config:
+    """Centralized thresholds & weights — no magic numbers elsewhere."""
+    # Block generation
+    bridging_rows: int = 2
+    bridging_cols: int = 1
+    connectivity: int = 4
+    min_on_cells: int = 4
+    do_bridging: bool = True
+
+    # Framing heuristics
+    min_density_keep: float = 0.50
+    min_density_reject: float = 0.15
+    min_cells_reject: int = 4
+    min_rows: int = 2
+    min_cols: int = 2
+    border_box_threshold: float = 0.60
+    max_internal_gap_ratio: float = 0.30
+
+    # Grammar — separator
+    sep_max_density: float = 0.10
+    sep_min_cross_span: float = 0.75
+
+    # Grammar — header restart
+    hdr_text_ratio: float = 0.60
+    hdr_bold_ratio: float = 0.40
+    hdr_fill_ratio: float = 0.30
+    hdr_min_filled: float = 0.50
+    body_numeric_ratio: float = 0.50
+    body_min_rows_before: int = 3
+
+    # Grammar — change-point
+    cp_min_shift: float = 0.30
+    cp_label_col_max: int = 2
+
+    # Grammar — split constraints
+    max_splits_per_block: int = 5
+    min_sub_block_height: int = 2
+    min_sub_block_width: int = 2
+    min_sub_block_cells: int = 4
+
+    # Pipeline
+    max_framing_passes: int = 2
+    max_workers: int = 4
+
+    # Export flags (off by default)
+    export_training_data: bool = False
+    export_cut_candidates: bool = False
+
+
+@dataclass
+class CutCandidate:
+    """A potential split line scored by each detection strategy."""
+    index: int              # 0-based relative row/col index within block
+    axis: str               # "row" | "col"
+    separator_score: float = 0.0
+    header_restart_score: float = 0.0
+    changepoint_score: float = 0.0
+    combined_score: float = 0.0
+    selected: bool = False

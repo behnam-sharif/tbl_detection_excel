@@ -4,7 +4,7 @@ parse_tools — Package for Excel table detection and cell analysis.
 Re-exports all public names for backward compatibility with the old flat parse_tools.py.
 """
 
-from .models import BBox, BlockCandidate, CellFeatures, BlockFeatures, TableDecision
+from .models import BBox, BlockCandidate, CellFeatures, BlockFeatures, TableDecision, Config, CutCandidate
 from .presence import (
     get_presence_matrix_for_sheet,
     get_presence_matrix_from_accessor,
@@ -22,6 +22,8 @@ __all__ = [
     "CellFeatures",
     "BlockFeatures",
     "TableDecision",
+    "Config",
+    "CutCandidate",
     # presence
     "get_presence_matrix_for_sheet",
     "get_presence_matrix_from_accessor",

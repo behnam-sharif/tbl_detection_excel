@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from typing import List, Tuple, Dict, Optional
 
-from parse_tools.models import BBox, BlockCandidate, BlockFeatures, TableDecision
+from parse_tools.models import BBox, BlockCandidate, BlockFeatures, TableDecision, Config
 from parse_tools.feature_extraction import classify_block_cells, compute_block_features
 from parse_tools.sheet_accessor import SheetAccessor
 
@@ -59,73 +59,78 @@ def _is_header_like_row(
 # ---------------------------------------------------------------------------
 
 def evaluate_block(
-    block: BlockCandidate, features: BlockFeatures
+    block: BlockCandidate, features: BlockFeatures, config: Optional[Config] = None,
 ) -> TableDecision:
     """
     Evaluate a block candidate and return a TableDecision.
 
     Decision priority:
-      1. REJECT  if density < MIN_DENSITY_REJECT
-      2. REJECT  if n_cells_on < MIN_CELLS_REJECT
-      3. REJECT  if height < MIN_ROWS or width < MIN_COLS
-      4. KEEP    if density >= MIN_DENSITY_KEEP AND border_coverage >= BORDER_BOX_THRESHOLD
-      5. KEEP    if density >= MIN_DENSITY_KEEP AND first row is predominantly text (header)
+      1. REJECT  if density < min_density_reject
+      2. REJECT  if n_cells_on < min_cells_reject
+      3. REJECT  if height < min_rows or width < min_cols
+      4. KEEP    if density >= min_density_keep AND border_coverage >= border_box_threshold
+      5. KEEP    if density >= min_density_keep AND first row is predominantly text (header)
       6. SHRINK  if leading/trailing fully-blank rows or cols exist
-      7. KEEP    (default) if density >= MIN_DENSITY_KEEP
+      7. KEEP    (default) if density >= min_density_keep
       8. SHRINK  (fallback) if density between reject and keep thresholds
     """
+    cfg = config or Config()
     bbox = block.bbox
     density = block.density
     height = bbox.height()
     width = bbox.width()
 
     # 1. Reject low density
-    if density < MIN_DENSITY_REJECT:
+    if density < cfg.min_density_reject:
         return TableDecision(
             action="reject",
-            rationale=f"density {density:.2f} below {MIN_DENSITY_REJECT}",
+            rationale=f"density {density:.2f} below {cfg.min_density_reject}",
             original_bbox=bbox,
             final_bbox=None,
             confidence=0.9,
+            signal_scores={"density": density},
         )
 
     # 2. Reject too few cells
-    if block.n_cells_on < MIN_CELLS_REJECT:
+    if block.n_cells_on < cfg.min_cells_reject:
         return TableDecision(
             action="reject",
-            rationale=f"only {block.n_cells_on} non-blank cells (min {MIN_CELLS_REJECT})",
+            rationale=f"only {block.n_cells_on} non-blank cells (min {cfg.min_cells_reject})",
             original_bbox=bbox,
             final_bbox=None,
             confidence=0.85,
+            signal_scores={"n_cells_on": float(block.n_cells_on)},
         )
 
     # 3. Reject too small dimensions
-    if height < MIN_ROWS or width < MIN_COLS:
+    if height < cfg.min_rows or width < cfg.min_cols:
         reason = []
-        if height < MIN_ROWS:
-            reason.append(f"height={height}<{MIN_ROWS}")
-        if width < MIN_COLS:
-            reason.append(f"width={width}<{MIN_COLS}")
+        if height < cfg.min_rows:
+            reason.append(f"height={height}<{cfg.min_rows}")
+        if width < cfg.min_cols:
+            reason.append(f"width={width}<{cfg.min_cols}")
         return TableDecision(
             action="reject",
             rationale=f"too small: {', '.join(reason)}",
             original_bbox=bbox,
             final_bbox=None,
             confidence=0.8,
+            signal_scores={"height": float(height), "width": float(width)},
         )
 
     # 4. Keep if dense + bordered
-    if density >= MIN_DENSITY_KEEP and features.border_coverage >= BORDER_BOX_THRESHOLD:
+    if density >= cfg.min_density_keep and features.border_coverage >= cfg.border_box_threshold:
         return TableDecision(
             action="keep",
             rationale=f"dense ({density:.2f}) with borders ({features.border_coverage:.2f})",
             original_bbox=bbox,
             final_bbox=bbox,
             confidence=0.95,
+            signal_scores={"density": density, "border_coverage": features.border_coverage},
         )
 
     # 5. Keep if dense + header-like first row
-    if density >= MIN_DENSITY_KEEP and features.row_type_histograms:
+    if density >= cfg.min_density_keep and features.row_type_histograms:
         first_row_hist = features.row_type_histograms[0]
         # Estimate bold% for first row from block-level bold_pct (approximation)
         bold_approx = features.bold_pct
@@ -136,6 +141,7 @@ def evaluate_block(
                 original_bbox=bbox,
                 final_bbox=bbox,
                 confidence=0.85,
+                signal_scores={"density": density, "bold_pct": features.bold_pct},
             )
 
     # 6. Shrink if leading/trailing blank rows/cols
@@ -154,16 +160,18 @@ def evaluate_block(
             original_bbox=bbox,
             final_bbox=bbox,  # will be updated by apply_shrink
             confidence=0.6,
+            signal_scores={"density": density, "has_leading_trailing_blanks": 1.0},
         )
 
     # 7. Default keep if density is high enough
-    if density >= MIN_DENSITY_KEEP:
+    if density >= cfg.min_density_keep:
         return TableDecision(
             action="keep",
             rationale=f"density {density:.2f} meets threshold",
             original_bbox=bbox,
             final_bbox=bbox,
             confidence=0.7,
+            signal_scores={"density": density},
         )
 
     # 8. Fallback shrink for medium density
@@ -173,6 +181,7 @@ def evaluate_block(
         original_bbox=bbox,
         final_bbox=bbox,
         confidence=0.5,
+        signal_scores={"density": density},
     )
 
 
@@ -251,12 +260,14 @@ def try_split_block(
     block: BlockCandidate,
     features: BlockFeatures,
     presence_matrix: List[List[int]],
+    config: Optional[Config] = None,
 ) -> List[BlockCandidate]:
     """
     Split on internal_gap_rows (horizontal splits) or internal_gap_cols (vertical).
     Recompute per sub-block; filter out tiny sub-blocks.
     Append '+split' to provenance.
     """
+    cfg = config or Config()
     bbox = block.bbox
     sub_blocks: List[BlockCandidate] = []
 
@@ -354,6 +365,7 @@ def run_framing_pipeline(
     base_row: int = 1,
     base_col: int = 1,
     max_passes: int = 2,
+    config: Optional[Config] = None,
 ) -> List[Tuple[BlockCandidate, TableDecision]]:
     """
     Multi-pass heuristic pipeline.
@@ -371,6 +383,7 @@ def run_framing_pipeline(
 
     Returns sorted by (bbox.r1, bbox.c1).
     """
+    cfg = config or Config()
     results: List[Tuple[BlockCandidate, TableDecision]] = []
     pending: List[BlockCandidate] = list(blocks)
     changed_in_pass = False
@@ -384,7 +397,7 @@ def run_framing_pipeline(
                     accessor, block.bbox, base_row=base_row, base_col=base_col
                 )
                 features = compute_block_features(cell_grid)
-                decision = evaluate_block(block, features)
+                decision = evaluate_block(block, features, config=cfg)
 
                 if decision.action == "shrink":
                     shrunk = apply_shrink(block, features, presence_matrix)
@@ -395,13 +408,14 @@ def run_framing_pipeline(
                         accessor, shrunk.bbox, base_row=base_row, base_col=base_col
                     )
                     features2 = compute_block_features(cell_grid2)
-                    decision2 = evaluate_block(shrunk, features2)
+                    decision2 = evaluate_block(shrunk, features2, config=cfg)
                     decision2 = TableDecision(
                         action=decision2.action if decision2.action != "shrink" else "keep",
                         rationale=decision2.rationale,
                         original_bbox=block.bbox,
                         final_bbox=shrunk.bbox,
                         confidence=decision2.confidence,
+                        signal_scores=decision2.signal_scores,
                     )
                     if decision2.action in ("keep", "reject"):
                         results.append((shrunk, decision2))
@@ -410,7 +424,7 @@ def run_framing_pipeline(
 
                 elif decision.action == "reject" and block.bbox.area() > 20:
                     # Try splitting before giving up
-                    sub_blocks = try_split_block(block, features, presence_matrix)
+                    sub_blocks = try_split_block(block, features, presence_matrix, config=cfg)
                     if len(sub_blocks) > 1:
                         changed_in_pass = True
                         next_pending.extend(sub_blocks)

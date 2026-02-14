@@ -16,14 +16,17 @@ from typing import List, Tuple, Dict, Optional
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 
-from parse_tools.models import BBox, BlockCandidate, TableDecision, Config, QCEvent, FinalCandidate, SheetResult
+from parse_tools.models import BBox, BlockCandidate, BlockFeatures, TableDecision, Config, QCEvent, FinalCandidate, SheetResult
 from parse_tools.sheet_accessor import SheetAccessor
 from parse_tools.presence import get_presence_matrix_from_accessor
+from parse_tools.feature_extraction import classify_block_cells, compute_block_features
 from block_generation import generate_block_candidates
 from table_framing_heuristics import run_framing_pipeline
 from grammar_heuristics import run_grammar_splitting
 from post_split_qc_gate import run_post_split_qc_gate
 from final_candidates import build_final_candidates
+from ml_export import export_training_row
+from run_export import export_run
 
 logger = logging.getLogger(__name__)
 
@@ -169,6 +172,22 @@ def process_single_sheet(
             logger.info("Sheet '%s': %d final candidates in %dms",
                 sheet_name, len(final_cands), int((t8 - t7) * 1000))
 
+            # Pre-compute training rows (while accessor is open)
+            training_rows = []
+            for block, decision in results:
+                if decision.action not in ("keep", "shrink") or decision.final_bbox is None:
+                    continue
+                try:
+                    cell_grid = classify_block_cells(
+                        accessor, decision.final_bbox, base_row=1, base_col=1,
+                    )
+                    features = compute_block_features(cell_grid)
+                except Exception:
+                    features = BlockFeatures()
+                training_rows.append(
+                    export_training_row(block, decision, features, sheet_name)
+                )
+
             # Log summary
             action_counts: Dict[str, int] = {}
             for _, decision in results:
@@ -205,6 +224,7 @@ def process_single_sheet(
                 final_candidates=final_cands,
                 qc_events=qc_events,
                 cut_candidates=cut_candidates,
+                training_rows=training_rows,
             )
 
     except Exception as e:
@@ -221,6 +241,7 @@ def parse_workbook(
     sheet_names: Optional[List[str]] = None,
     max_workers: int = 4,
     config: Optional[Config] = None,
+    export_base_dir: Optional[str] = None,
     **pipeline_kwargs,
 ) -> Dict[str, SheetResult]:
     """
@@ -267,5 +288,13 @@ def parse_workbook(
     ordered: Dict[str, SheetResult] = {}
     for sn in sheet_names:
         ordered[sn] = results.get(sn, SheetResult())
+
+    # Export run directory if requested
+    if export_base_dir is not None:
+        output_dir = export_run(
+            file_path, ordered,
+            base_dir=export_base_dir, config=config,
+        )
+        logger.info("Run directory written to: %s", output_dir)
 
     return ordered

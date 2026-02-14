@@ -11,7 +11,7 @@ from typing import Any, List, Dict, Optional, Tuple
 
 from parse_tools.models import (
     BBox, BlockCandidate, BlockFeatures, CellFeatures,
-    TableDecision, Config, CutCandidate,
+    TableDecision, Config, CutCandidate, QCEvent,
 )
 from parse_tools.feature_extraction import classify_block_cells, compute_block_features
 from parse_tools.sheet_accessor import SheetAccessor
@@ -25,6 +25,8 @@ def export_training_row(
     y_is_table: Optional[bool] = None,
     y_split: Optional[List[int]] = None,
     y_header_row_idx: Optional[int] = None,
+    workbook_id: str = "",
+    candidate_id: str = "",
 ) -> dict:
     """
     Flat dict suitable for ML training. Contains bbox, features, decision info,
@@ -36,6 +38,8 @@ def export_training_row(
 
     row = {
         # Identity
+        "workbook_id": workbook_id,
+        "candidate_id": candidate_id,
         "sheet_name": sheet_name,
         "bbox_r1": bbox.r1,
         "bbox_c1": bbox.c1,
@@ -123,6 +127,21 @@ def export_cut_candidate(
         "changepoint_score": cut.changepoint_score,
         "combined_score": cut.combined_score,
         "selected": cut.selected,
+    }
+
+
+def export_qc_event(event: QCEvent) -> dict:
+    """Serialize a QCEvent into a Repo 2-compatible dict."""
+    def _bbox_dict(bbox: BBox) -> dict:
+        return {"r0": bbox.r1, "c0": bbox.c1, "r1": bbox.r2, "c1": bbox.c2}
+
+    return {
+        "block_bbox_before": _bbox_dict(event.block_bbox_before),
+        "block_bbox_after": _bbox_dict(event.block_bbox_after) if event.block_bbox_after else None,
+        "action": event.action,
+        "reason": event.reason,
+        "scores": dict(event.scores),
+        "metadata": dict(event.metadata),
     }
 
 

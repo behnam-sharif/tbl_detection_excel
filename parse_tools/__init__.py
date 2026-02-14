@@ -17,6 +17,7 @@ from .presence import (
 from .sheet_accessor import SheetAccessor
 from .cell_classifier import classify_cell_type, extract_cell_features
 from .feature_extraction import classify_block_cells, compute_block_features
+from .id_utils import compute_workbook_id, compute_candidate_id
 
 __all__ = [
     # models
@@ -45,4 +46,7 @@ __all__ = [
     # feature_extraction
     "classify_block_cells",
     "compute_block_features",
+    # id_utils
+    "compute_workbook_id",
+    "compute_candidate_id",
 ]

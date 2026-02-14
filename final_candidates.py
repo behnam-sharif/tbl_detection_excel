@@ -348,9 +348,30 @@ def _build_qc_flags(
 # Export Helpers
 # ---------------------------------------------------------------------------
 
-def export_final_candidate(candidate: FinalCandidate) -> Dict[str, Any]:
-    """Flatten a FinalCandidate into a JSON-friendly dict."""
+def export_final_candidate(
+    candidate: FinalCandidate,
+    workbook_id: str = "",
+    rank: int = 0,
+) -> Dict[str, Any]:
+    """Flatten a FinalCandidate into a JSON-friendly dict.
+
+    Includes Repo 2 contract fields (workbook_id, candidate_id, bbox object,
+    score_total, source, rank) alongside existing fields.
+    """
     return {
+        # Repo 2 contract fields
+        "workbook_id": workbook_id,
+        "candidate_id": candidate.candidate_id,
+        "bbox": {
+            "r0": candidate.bbox.r1,
+            "c0": candidate.bbox.c1,
+            "r1": candidate.bbox.r2,
+            "c1": candidate.bbox.c2,
+        },
+        "score_total": candidate.table_likeness_score,
+        "source": candidate.provenance,
+        "rank": rank,
+        # Existing fields
         "bbox_r1": candidate.bbox.r1,
         "bbox_c1": candidate.bbox.c1,
         "bbox_r2": candidate.bbox.r2,
@@ -378,6 +399,10 @@ def export_final_candidate(candidate: FinalCandidate) -> Dict[str, Any]:
 
 def export_final_candidates_batch(
     candidates: List[FinalCandidate],
+    workbook_id: str = "",
 ) -> List[Dict[str, Any]]:
     """Export a batch of FinalCandidates for candidate_rows.jsonl."""
-    return [export_final_candidate(c) for c in candidates]
+    return [
+        export_final_candidate(c, workbook_id=workbook_id, rank=i)
+        for i, c in enumerate(candidates)
+    ]

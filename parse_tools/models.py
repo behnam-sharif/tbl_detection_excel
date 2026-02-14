@@ -44,6 +44,7 @@ class BlockCandidate:
     density: float
     provenance: str       # e.g. "cc", "cc+bridge", "cc+expand"
     sheet_name: str = ""  # populated by generate_block_candidates
+    candidate_id: str = ""  # stable ID for cross-repo traceability
 
 
 @dataclass
@@ -216,6 +217,7 @@ class FinalCandidate:
     confidence: float = 0.0
     n_cells_on: int = 0
     density: float = 0.0
+    candidate_id: str = ""  # stable ID for cross-repo traceability
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -226,3 +228,4 @@ class SheetResult:
     final_candidates: List[FinalCandidate] = field(default_factory=list)
     qc_events: List[QCEvent] = field(default_factory=list)
     cut_candidates: Dict[str, List['CutCandidate']] = field(default_factory=dict)
+    training_rows: List[Dict[str, Any]] = field(default_factory=list)  # pre-computed for export

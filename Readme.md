@@ -7,9 +7,22 @@ Excel table detection and parsing: identify and extract table boundaries from sp
 The pipeline runs **per sheet** and produces final table candidates (bounding boxes, header rows, structural type, scores) for later ML or LLM processing.
 
 ![Per-sheet pipeline: load grid → presence matrix → block generation → cell classification → table framing → grammar splitting → QC gate → final candidates](assets/per-sheet-pipeline.png)
+
 ## Project Overview
 
 xl_parse is an Excel table detection and parsing system. It identifies and extracts table boundaries from spreadsheets using a multi-stage heuristic pipeline, handling complex layouts with multiple tables per sheet.
+
+## Per-sheet pipeline summary (parallelized)
+
+1. **Load sheet** — `SheetAccessor` opens the workbook/sheet and exposes values, formulas, and styles.
+2. **Presence matrix** — Build a 0/1 matrix (`1` for non-empty cells, `0` for empty cells).
+3. **Block generation** — Find connected components, optionally bridge small gaps, then expand context to include likely header/label regions.
+4. **Framing heuristics** — For each block, classify cells and features, then decide `keep`/`reject`/`shrink` (and sometimes split large rejects). Shrunk blocks are re-evaluated.
+5. **Grammar heuristics** — For kept/shrunk blocks, detect multi-table boundaries using separator lines, header restarts, and change-points.
+6. **Post-split QC gate** — Apply pullback, fast reject filters, tiny-fragment merges, and refinement passes (re-split/adjacent merge).
+7. **Final candidates** — Build `FinalCandidate` objects with bbox, header/key-column info, structural type, scores, and QC flags.
+8. **Per-sheet output** — Return `SheetResult` with `results`, `final_candidates`, `qc_events`, and `cut_candidates`.
+9. **Export helpers** — `ml_export.py` provides optional flattening for ML rows, cut candidates, and LLM-QC payload stubs.
 
 ## Dependencies
 

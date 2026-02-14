@@ -60,6 +60,34 @@ def get_parser():
     return _fallback_parse_excel_file
 
 
+def _normalize_sheet_pairs(sheet_result):
+    """
+    Normalize table-detection output into a list of (BlockCandidate, TableDecision).
+
+    Handles both expected `SheetResult.results` and legacy/direct list formats.
+    Also guards against accidental nested SheetResult objects.
+    """
+    if sheet_result is None:
+        return []
+
+    # Legacy shape: result already is a list of (block, decision)
+    if isinstance(sheet_result, list):
+        return sheet_result
+
+    pairs = getattr(sheet_result, "results", [])
+    # Defensive: sometimes results may be wrapped one more level.
+    if hasattr(pairs, "results"):
+        pairs = getattr(pairs, "results", [])
+
+    if pairs is None:
+        return []
+
+    try:
+        return list(pairs)
+    except TypeError:
+        return []
+
+
 
 
 # Initialize session state
@@ -357,8 +385,10 @@ elif page == "Table Detection":
                         )
                         st.session_state.table_detection_results = results
                         total_tables = sum(
-                            1 for sheet_results in results.values()
-                            for _, d in sheet_results if d.action in ("keep", "shrink")
+                            1
+                            for sheet_result in results.values()
+                            for _, d in _normalize_sheet_pairs(sheet_result)
+                            if d.action in ("keep", "shrink")
                         )
                         st.success(
                             f"Detection complete: {total_tables} table(s) found across "
@@ -383,7 +413,8 @@ elif page == "Table Detection":
                 }
 
                 for sheet_name in sheet_names:
-                    sheet_results = st.session_state.table_detection_results.get(sheet_name, [])
+                    sheet_result = st.session_state.table_detection_results.get(sheet_name, None)
+                    sheet_results = _normalize_sheet_pairs(sheet_result)
                     n_tables = sum(1 for _, d in sheet_results if d.action in ("keep", "shrink"))
                     n_total = len(sheet_results)
 

@@ -135,6 +135,31 @@ class Config:
     export_training_data: bool = False
     export_cut_candidates: bool = False
 
+    # --- QC gate ---
+    qc_min_height: int = 2
+    qc_min_width: int = 2
+    qc_min_nonblank: int = 4
+    qc_max_blank_ratio: float = 0.85
+    qc_min_header_score: float = 0.3
+    qc_min_structure_score: float = 0.4
+    qc_banner_max_rows: int = 1
+    qc_banner_text_ratio: float = 0.80
+    qc_merge_max_gap: int = 1
+    qc_merge_histogram_threshold: float = 0.3
+    qc_header_pullback_max_rows: int = 3
+    qc_footer_pullback_max_rows: int = 2
+    qc_max_refinement_passes: int = 2
+
+    # --- Final candidate classification ---
+    fc_header_confidence_min: float = 0.4
+    fc_structural_formula_ratio: float = 0.5
+    fc_structural_input_ratio: float = 0.7
+    fc_structural_lookup_max_cols: int = 3
+    fc_structural_lookup_text_ratio: float = 0.7
+
+    # --- Export flags (QC) ---
+    export_qc_events: bool = False
+
 
 @dataclass
 class CutCandidate:
@@ -146,3 +171,58 @@ class CutCandidate:
     changepoint_score: float = 0.0
     combined_score: float = 0.0
     selected: bool = False
+
+
+@dataclass
+class QCEvent:
+    """Audit record of a QC gate action."""
+    block_bbox_before: BBox
+    block_bbox_after: Optional[BBox]
+    action: str          # "pass"|"reject"|"merge"|"header_pullback"|"footer_pullback"|"re_split"
+    reason: str
+    scores: Dict[str, float] = field(default_factory=dict)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class HeaderInfo:
+    """Detected header row(s) within a table candidate."""
+    row_indices: List[int] = field(default_factory=list)  # 0-indexed relative to bbox
+    confidence: float = 0.0
+    multi_row: bool = False
+
+
+@dataclass
+class KeyColumnInfo:
+    """Detected key/stub/unit column."""
+    col_index: int = 0       # 0-indexed relative to bbox
+    role: str = "label"      # "label"|"unit"|"stub"
+    confidence: float = 0.0
+
+
+@dataclass
+class FinalCandidate:
+    """ML/LLM-ready table candidate with full metadata."""
+    bbox: BBox
+    sheet_name: str
+    header: HeaderInfo = field(default_factory=HeaderInfo)
+    key_columns: List[KeyColumnInfo] = field(default_factory=list)
+    structural_type: str = "mixed"  # "input"|"calc"|"mixed"|"lookup"
+    table_likeness_score: float = 0.0
+    header_score: float = 0.0
+    separator_scores: Dict[str, float] = field(default_factory=dict)
+    qc_flags: List[str] = field(default_factory=list)
+    provenance: str = ""
+    confidence: float = 0.0
+    n_cells_on: int = 0
+    density: float = 0.0
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class SheetResult:
+    """Complete output for one sheet."""
+    results: List[Tuple['BlockCandidate', 'TableDecision']] = field(default_factory=list)
+    final_candidates: List[FinalCandidate] = field(default_factory=list)
+    qc_events: List[QCEvent] = field(default_factory=list)
+    cut_candidates: Dict[str, List['CutCandidate']] = field(default_factory=dict)

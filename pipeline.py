@@ -16,12 +16,14 @@ from typing import List, Tuple, Dict, Optional
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 
-from parse_tools.models import BBox, BlockCandidate, TableDecision, Config
+from parse_tools.models import BBox, BlockCandidate, TableDecision, Config, QCEvent, FinalCandidate, SheetResult
 from parse_tools.sheet_accessor import SheetAccessor
 from parse_tools.presence import get_presence_matrix_from_accessor
 from block_generation import generate_block_candidates
 from table_framing_heuristics import run_framing_pipeline
 from grammar_heuristics import run_grammar_splitting
+from post_split_qc_gate import run_post_split_qc_gate
+from final_candidates import build_final_candidates
 
 logger = logging.getLogger(__name__)
 
@@ -82,13 +84,13 @@ def process_single_sheet(
     do_bridging: bool = True,
     max_framing_passes: int = 2,
     config: Optional[Config] = None,
-) -> List[Tuple[BlockCandidate, TableDecision]]:
+) -> SheetResult:
     """
     Full pipeline for one sheet:
       SheetAccessor -> presence matrix -> generate_block_candidates
-      -> run_framing_pipeline -> sorted results
+      -> run_framing_pipeline -> grammar splitting -> QC gate -> final candidates
 
-    Catches exceptions -> logs warning -> returns [].
+    Catches exceptions -> logs warning -> returns empty SheetResult.
     """
     t0 = time.perf_counter()
     try:
@@ -146,6 +148,27 @@ def process_single_sheet(
                     sheet_name, grammar_splits, int((t4 - t3) * 1000),
                 )
 
+            # Post-split QC gate
+            t5 = time.perf_counter()
+            results, qc_events = run_post_split_qc_gate(
+                results, accessor, presence, config=config,
+                base_row=1, base_col=1,
+            )
+            t6 = time.perf_counter()
+            if qc_events:
+                logger.info("Sheet '%s': QC gate produced %d events in %dms",
+                    sheet_name, len(qc_events), int((t6 - t5) * 1000))
+
+            # Build final candidates
+            t7 = time.perf_counter()
+            final_cands = build_final_candidates(
+                results, accessor, presence, config=config,
+                base_row=1, base_col=1,
+            )
+            t8 = time.perf_counter()
+            logger.info("Sheet '%s': %d final candidates in %dms",
+                sheet_name, len(final_cands), int((t8 - t7) * 1000))
+
             # Log summary
             action_counts: Dict[str, int] = {}
             for _, decision in results:
@@ -177,11 +200,16 @@ def process_single_sheet(
                 sheet_name, elapsed, tables_detected,
             )
 
-            return results
+            return SheetResult(
+                results=results,
+                final_candidates=final_cands,
+                qc_events=qc_events,
+                cut_candidates=cut_candidates,
+            )
 
     except Exception as e:
         logger.warning("Error processing sheet '%s': %s", sheet_name, e)
-        return []
+        return SheetResult()
 
 
 # ---------------------------------------------------------------------------
@@ -194,7 +222,7 @@ def parse_workbook(
     max_workers: int = 4,
     config: Optional[Config] = None,
     **pipeline_kwargs,
-) -> Dict[str, List[Tuple[BlockCandidate, TableDecision]]]:
+) -> Dict[str, SheetResult]:
     """
     Top-level entry point. Processes all (or selected) sheets in parallel.
 
@@ -212,7 +240,7 @@ def parse_workbook(
         return {}
 
     effective_workers = min(max_workers, len(sheet_names))
-    results: Dict[str, List[Tuple[BlockCandidate, TableDecision]]] = {}
+    results: Dict[str, SheetResult] = {}
 
     logger.info(
         "parse_workbook: %d sheets, %d workers, file=%s",
@@ -233,11 +261,11 @@ def parse_workbook(
                 results[sn] = future.result()
             except Exception as e:
                 logger.warning("Thread error for sheet '%s': %s", sn, e)
-                results[sn] = []
+                results[sn] = SheetResult()
 
     # Return in original sheet order
-    ordered: Dict[str, List[Tuple[BlockCandidate, TableDecision]]] = {}
+    ordered: Dict[str, SheetResult] = {}
     for sn in sheet_names:
-        ordered[sn] = results.get(sn, [])
+        ordered[sn] = results.get(sn, SheetResult())
 
     return ordered

@@ -137,8 +137,15 @@ def _write_csv(path: str, rows: List[dict]) -> None:
         with open(path, "w", encoding="utf-8") as f:
             pass  # empty file
         return
-    fieldnames = list(rows[0].keys())
+    # Training rows can differ by dynamic keys (e.g. signal_* from signal_scores).
+    seen: set[str] = set()
+    fieldnames: List[str] = []
+    for row in rows:
+        for k in row.keys():
+            if k not in seen:
+                seen.add(k)
+                fieldnames.append(k)
     with open(path, "w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)

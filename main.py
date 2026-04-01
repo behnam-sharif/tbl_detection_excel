@@ -1,5 +1,6 @@
 # === app/main.py ===
 import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -332,6 +333,10 @@ elif page == "Block Candidates":
 elif page == "Table Detection":
     st.header("Table Detection")
 
+    _export_notice = st.session_state.pop("xl_parse_export_notice", None)
+    if _export_notice:
+        st.success(_export_notice)
+
     if not st.session_state.excel_parsed:
         st.warning("Please upload and parse an Excel file first.")
     elif parse_workbook is None:
@@ -368,6 +373,17 @@ elif page == "Table Detection":
                 td_max_workers = st.number_input("Max threads", min_value=1, max_value=8, value=4, key="td_workers")
                 td_max_passes = st.number_input("Max framing passes", min_value=1, max_value=5, value=2, key="td_passes")
 
+            td_export_base = st.text_input(
+                "Export pipeline output to this folder (optional)",
+                value="",
+                key="td_export_base",
+                help=(
+                    "If set, saves a timestamped run under this path with final_candidates.jsonl, "
+                    "cut_scores.jsonl, etc., and copies final_candidates.jsonl → candidate_rows.jsonl "
+                    "so xl_kg can use this folder as “Parse dir”."
+                ),
+            )
+
             if st.button("Run Table Detection", key="td_run_btn"):
                 st.session_state.table_detection_results = {}
                 with st.spinner("Running table detection pipeline..."):
@@ -390,10 +406,33 @@ elif page == "Table Detection":
                             for _, d in _normalize_sheet_pairs(sheet_result)
                             if d.action in ("keep", "shrink")
                         )
-                        st.success(
+                        msg = (
                             f"Detection complete: {total_tables} table(s) found across "
                             f"{len(sheet_names)} sheet(s)."
                         )
+                        export_base = (td_export_base or "").strip()
+                        if export_base:
+                            from run_export import export_run
+
+                            os.makedirs(export_base, exist_ok=True)
+                            out_dir = export_run(
+                                file_path, results, base_dir=export_base,
+                            )
+                            fc = os.path.join(out_dir, "final_candidates.jsonl")
+                            cr = os.path.join(out_dir, "candidate_rows.jsonl")
+                            if os.path.isfile(fc):
+                                shutil.copy2(fc, cr)
+                            msg += (
+                                f"\n\n**Saved for xl_kg:** `{out_dir}` — use as **Parse dir** "
+                                f"(contains `candidate_rows.jsonl`)."
+                            )
+                            st.session_state.xl_parse_export_notice = msg
+                        else:
+                            st.session_state.xl_parse_export_notice = (
+                                msg
+                                + "\n\n_No files written._ To use **xl_kg**, set **Export pipeline output** "
+                                "above and run again, or run `python scripts/step2_xl_parse.py ...`."
+                            )
                         st.rerun()
                     except Exception as e:
                         st.error(f"Pipeline error: {e}")

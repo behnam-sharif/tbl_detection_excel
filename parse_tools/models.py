@@ -161,6 +161,27 @@ class Config:
     # --- Export flags (QC) ---
     export_qc_events: bool = False
 
+    # --- Merged cell inflation (Part A) ---
+    merge_inflate_presence: bool = True
+    max_merge_area_for_inflation: int = 200
+
+    # --- Density trim (Part B) ---
+    density_trim_enabled: bool = True
+    density_trim_min_col_fill: float = 0.10
+    density_trim_min_row_fill: float = 0.10
+    density_trim_min_width: int = 2
+    density_trim_min_height: int = 2
+
+    # --- Overlap / duplicate consolidation (Part D) ---
+    consolidation_enabled: bool = True
+    consolidation_iou_threshold: float = 0.50
+    consolidation_containment_threshold: float = 0.80
+    consolidation_score_epsilon: float = 0.05
+
+    # --- Rejected blocks + coverage (Part H) ---
+    export_rejected_blocks: bool = True
+    max_rejected_per_sheet: int = 200
+
 
 @dataclass
 class CutCandidate:
@@ -222,6 +243,18 @@ class FinalCandidate:
 
 
 @dataclass
+class RejectedBlock:
+    """A block that was rejected at some pipeline stage."""
+    sheet_name: str
+    bbox: BBox
+    rejection_stage: str      # "framing" | "qc_fast_filter" | "qc_merge" | "qc_refinement" | "audit_gap"
+    reason_codes: List[str]
+    provenance: str
+    n_cells_on: int
+    density: float
+
+
+@dataclass
 class SheetResult:
     """Complete output for one sheet."""
     results: List[Tuple['BlockCandidate', 'TableDecision']] = field(default_factory=list)
@@ -229,3 +262,4 @@ class SheetResult:
     qc_events: List[QCEvent] = field(default_factory=list)
     cut_candidates: Dict[str, List['CutCandidate']] = field(default_factory=dict)
     training_rows: List[Dict[str, Any]] = field(default_factory=list)  # pre-computed for export
+    rejected_blocks: List[RejectedBlock] = field(default_factory=list)

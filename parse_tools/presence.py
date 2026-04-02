@@ -79,6 +79,49 @@ def get_presence_matrix_from_accessor(
     return P
 
 
+def inflate_presence_for_merges(
+    P: List[List[int]],
+    accessor: "SheetAccessor",
+    cfg: "Config",
+) -> List[List[int]]:
+    """
+    Inflate presence matrix for merged cells.
+
+    For each merged range where the top-left cell has content (value or formula),
+    set all cells in the range to 1 in the presence matrix.
+    Skips merges larger than cfg.max_merge_area_for_inflation.
+    Coordinates: merge ranges are 1-indexed (openpyxl); P is 0-indexed.
+    """
+    from .models import Config
+    nrows = len(P)
+    ncols = len(P[0]) if P else 0
+
+    for mr in accessor.merged_ranges:
+        height = mr.max_row - mr.min_row + 1
+        width = mr.max_col - mr.min_col + 1
+        area = height * width
+
+        if area > cfg.max_merge_area_for_inflation:
+            continue
+
+        # Check if top-left cell has content (1-indexed)
+        value = accessor.get_cell_value(mr.min_row, mr.min_col)
+        data_type = accessor.get_cell_data_type(mr.min_row, mr.min_col)
+        has_content = (value is not None and str(value).strip() != "") or data_type == "f"
+
+        if not has_content:
+            continue
+
+        # Set all cells in the merge range to 1 (convert 1-indexed to 0-indexed)
+        for r in range(mr.min_row - 1, mr.max_row):
+            if 0 <= r < nrows:
+                for c in range(mr.min_col - 1, mr.max_col):
+                    if 0 <= c < ncols:
+                        P[r][c] = 1
+
+    return P
+
+
 def bbox_to_excel_range(
     bbox: "BBox", base_row: int = 1, base_col: int = 1
 ) -> str:

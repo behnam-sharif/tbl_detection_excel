@@ -292,11 +292,30 @@ def _apply_fast_filters(
         if reason is None and block.n_cells_on < cfg.qc_min_nonblank:
             reason = f"only {block.n_cells_on} nonblank cells"
 
-        # 3. Blank ratio
+        # 3. Blank ratio (with density trim rescue)
         if reason is None and area > 0:
             blank_ratio = (area - block.n_cells_on) / area
             if blank_ratio > cfg.qc_max_blank_ratio:
-                reason = f"blank ratio {blank_ratio:.2f} > {cfg.qc_max_blank_ratio}"
+                rescued = False
+                if cfg.density_trim_enabled:
+                    trimmed = _density_trim(block, decision, presence_matrix, cfg)
+                    if trimmed is not None:
+                        trimmed_block, trimmed_decision = trimmed
+                        new_area = trimmed_block.bbox.area()
+                        new_blank = (new_area - trimmed_block.n_cells_on) / new_area if new_area > 0 else 1.0
+                        if new_blank <= cfg.qc_max_blank_ratio:
+                            events.append(QCEvent(
+                                block_bbox_before=fbbox,
+                                block_bbox_after=trimmed_block.bbox,
+                                action="density_trim",
+                                reason=f"rescued by density trim: blank {blank_ratio:.2f} → {new_blank:.2f}",
+                            ))
+                            passed.append((trimmed_block, trimmed_decision))
+                            rescued = True
+                if rescued:
+                    continue  # Skip remaining filters for rescued block
+                else:
+                    reason = f"blank ratio {blank_ratio:.2f} > {cfg.qc_max_blank_ratio}"
 
         # 4. Banner detection
         if reason is None and height <= cfg.qc_banner_max_rows:
@@ -365,6 +384,97 @@ def _apply_fast_filters(
             passed.append((block, decision))
 
     return passed, rejected, events
+
+
+def _density_trim(
+    block: BlockCandidate,
+    decision: TableDecision,
+    presence_matrix: List[List[int]],
+    cfg: Config,
+) -> Optional[Tuple[BlockCandidate, TableDecision]]:
+    """
+    Trim sparse edges from a block to improve density.
+    Drops columns/rows from edges where fill rate < threshold.
+    Returns (trimmed_block, trimmed_decision) or None if no useful trim.
+    """
+    fbbox = decision.final_bbox if decision.final_bbox is not None else block.bbox
+    r1, c1, r2, c2 = fbbox.r1, fbbox.c1, fbbox.r2, fbbox.c2
+    nrows_p = len(presence_matrix)
+    ncols_p = len(presence_matrix[0]) if presence_matrix else 0
+    height = r2 - r1 + 1
+    width = c2 - c1 + 1
+
+    # Compute per-column fill rate
+    def col_fill(c: int) -> float:
+        count = sum(
+            presence_matrix[r][c] for r in range(max(0, r1), min(r2 + 1, nrows_p))
+            if c < ncols_p
+        )
+        return count / height if height > 0 else 0.0
+
+    # Compute per-row fill rate
+    def row_fill(r: int) -> float:
+        count = sum(
+            presence_matrix[r][c] for c in range(max(0, c1), min(c2 + 1, ncols_p))
+            if r < nrows_p
+        )
+        return count / width if width > 0 else 0.0
+
+    new_c1, new_c2 = c1, c2
+    new_r1, new_r2 = r1, r2
+
+    # Trim right columns
+    while new_c2 > new_c1 and (new_c2 - new_c1 + 1) > cfg.density_trim_min_width:
+        if col_fill(new_c2) < cfg.density_trim_min_col_fill:
+            new_c2 -= 1
+        else:
+            break
+
+    # Trim left columns
+    while new_c1 < new_c2 and (new_c2 - new_c1 + 1) > cfg.density_trim_min_width:
+        if col_fill(new_c1) < cfg.density_trim_min_col_fill:
+            new_c1 += 1
+        else:
+            break
+
+    # Trim bottom rows
+    while new_r2 > new_r1 and (new_r2 - new_r1 + 1) > cfg.density_trim_min_height:
+        if row_fill(new_r2) < cfg.density_trim_min_row_fill:
+            new_r2 -= 1
+        else:
+            break
+
+    # Trim top rows
+    while new_r1 < new_r2 and (new_r2 - new_r1 + 1) > cfg.density_trim_min_height:
+        if row_fill(new_r1) < cfg.density_trim_min_row_fill:
+            new_r1 += 1
+        else:
+            break
+
+    # Check if anything changed
+    if (new_r1, new_c1, new_r2, new_c2) == (r1, c1, r2, c2):
+        return None
+
+    new_bbox = BBox(new_r1, new_c1, new_r2, new_c2)
+    on_count = _count_on_cells(presence_matrix, new_bbox)
+    area = new_bbox.area()
+    new_density = on_count / area if area else 0.0
+
+    prov = block.provenance
+    if "+density_trim" not in prov:
+        prov += "+density_trim"
+
+    trimmed_block = BlockCandidate(
+        bbox=new_bbox, n_cells_on=on_count, density=new_density,
+        provenance=prov, sheet_name=block.sheet_name,
+    )
+    trimmed_decision = TableDecision(
+        action=decision.action, rationale=decision.rationale,
+        original_bbox=decision.original_bbox, final_bbox=new_bbox,
+        confidence=decision.confidence, signal_scores=decision.signal_scores,
+        metadata=decision.metadata,
+    )
+    return trimmed_block, trimmed_decision
 
 
 def _compute_header_score(

@@ -14,10 +14,11 @@ import os
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
-from parse_tools.models import BBox, Config, SheetResult
+from parse_tools.models import BBox, Config, FinalCandidate, SheetResult, RejectedBlock
 from parse_tools.id_utils import compute_workbook_id, compute_candidate_id
 from final_candidates import export_final_candidate
 from ml_export import export_cut_candidate, export_qc_event
+from consolidation import consolidate_candidates
 
 logger = logging.getLogger(__name__)
 
@@ -45,32 +46,29 @@ def export_run(
     os.makedirs(output_dir, exist_ok=True)
 
     # 3. Collect all data across sheets
-    all_final_rows: List[dict] = []
+    all_finals: List[FinalCandidate] = []
     all_training_rows: List[dict] = []
     all_qc_rows: List[dict] = []
     all_cut_rows: List[dict] = []
-    total_candidates = 0
+    all_rejected: List[RejectedBlock] = []
+    # Collect presence matrices for coverage report
+    presence_matrices: Dict[str, List[List[int]]] = {}
 
     for sheet_name, sheet_result in workbook_results.items():
-        # --- Final candidates: assign IDs and export ---
+        # --- Final candidates: assign IDs ---
         for rank, fc in enumerate(sheet_result.final_candidates):
             cid = compute_candidate_id(workbook_id, sheet_name, fc.bbox, rank)
             fc.candidate_id = cid
+            all_finals.append(fc)
 
-            all_final_rows.append(
-                export_final_candidate(fc, workbook_id=workbook_id, rank=rank)
-            )
-            total_candidates += 1
-
-        # --- Features (pre-computed training rows from pipeline) ---
-        # Build a bbox -> candidate_id map from final candidates
+        # --- Training rows ---
         cid_map: Dict[tuple, str] = {}
         for fc in sheet_result.final_candidates:
             key = (fc.sheet_name, fc.bbox.r1, fc.bbox.c1, fc.bbox.r2, fc.bbox.c2)
             cid_map[key] = fc.candidate_id
 
         for row in sheet_result.training_rows:
-            row = dict(row)  # copy to avoid mutating original
+            row = dict(row)
             row["workbook_id"] = workbook_id
             bbox_key = (row["sheet_name"], row["bbox_r1"], row["bbox_c1"], row["bbox_r2"], row["bbox_c2"])
             row["candidate_id"] = cid_map.get(bbox_key, "")
@@ -93,6 +91,22 @@ def export_run(
                     row["workbook_id"] = workbook_id
                     all_cut_rows.append(row)
 
+        # --- Rejected blocks ---
+        all_rejected.extend(sheet_result.rejected_blocks)
+
+    # Part D: Overlap/duplicate consolidation
+    dedupe_events: List[dict] = []
+    if cfg.consolidation_enabled:
+        all_finals, dedupe_events = consolidate_candidates(all_finals, cfg)
+
+    # Export final candidates
+    total_candidates = len(all_finals)
+    all_final_rows: List[dict] = []
+    for rank, fc in enumerate(all_finals):
+        all_final_rows.append(
+            export_final_candidate(fc, workbook_id=workbook_id, rank=rank)
+        )
+
     # 4. Write final_candidates.jsonl
     _write_jsonl(os.path.join(output_dir, "final_candidates.jsonl"), all_final_rows)
 
@@ -105,7 +119,33 @@ def export_run(
     # 7. Write cut_scores.jsonl
     _write_jsonl(os.path.join(output_dir, "cut_scores.jsonl"), all_cut_rows)
 
-    # 8. Write run_meta.json
+    # 8. Write dedupe_report.jsonl (Part D)
+    if dedupe_events:
+        _write_jsonl(os.path.join(output_dir, "dedupe_report.jsonl"), dedupe_events)
+
+    # 9. Write rejected_blocks.jsonl (Part H)
+    if cfg.export_rejected_blocks and all_rejected:
+        rejected_rows = [
+            {
+                "sheet_name": rb.sheet_name,
+                "bbox_r1": rb.bbox.r1,
+                "bbox_c1": rb.bbox.c1,
+                "bbox_r2": rb.bbox.r2,
+                "bbox_c2": rb.bbox.c2,
+                "rejection_stage": rb.rejection_stage,
+                "reason_codes": rb.reason_codes,
+                "provenance": rb.provenance,
+                "n_cells_on": rb.n_cells_on,
+                "density": rb.density,
+            }
+            for rb in all_rejected
+        ]
+        _write_jsonl(os.path.join(output_dir, "rejected_blocks.jsonl"), rejected_rows)
+
+    # 10. Write coverage_report.json (Part H)
+    _write_coverage_report(output_dir, workbook_results, all_finals, all_rejected)
+
+    # 11. Write run_meta.json
     meta = {
         "workbook_id": workbook_id,
         "workbook_path": os.path.abspath(file_path),
@@ -149,3 +189,70 @@ def _write_csv(path: str, rows: List[dict]) -> None:
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
+
+
+def _write_coverage_report(
+    output_dir: str,
+    workbook_results: Dict[str, SheetResult],
+    all_finals: List[FinalCandidate],
+    all_rejected: List[RejectedBlock],
+) -> None:
+    """
+    Compute and write per-sheet coverage report.
+    valued_cells = cells where presence == 1
+    covered_cells = union of final candidate + rejected block bboxes
+    uncovered_cells = valued_cells - covered_cells
+    """
+    # Build per-sheet coverage data
+    # We need presence matrices from pipeline results — approximate from
+    # block data since we don't store the full matrix in SheetResult
+    coverage: Dict[str, dict] = {}
+
+    # Group finals and rejected by sheet
+    finals_by_sheet: Dict[str, List[BBox]] = {}
+    for fc in all_finals:
+        finals_by_sheet.setdefault(fc.sheet_name, []).append(fc.bbox)
+
+    rejected_by_sheet: Dict[str, List[BBox]] = {}
+    for rb in all_rejected:
+        rejected_by_sheet.setdefault(rb.sheet_name, []).append(rb.bbox)
+
+    for sheet_name, sheet_result in workbook_results.items():
+        # Estimate valued cells from all blocks that were ever seen
+        # (both kept and rejected results have bbox info)
+        all_block_cells: set = set()
+        for block, decision in sheet_result.results:
+            bbox = block.bbox
+            for r in range(bbox.r1, bbox.r2 + 1):
+                for c in range(bbox.c1, bbox.c2 + 1):
+                    all_block_cells.add((r, c))
+
+        # Covered cells from final candidates + rejected blocks
+        covered_cells: set = set()
+        for bbox in finals_by_sheet.get(sheet_name, []):
+            for r in range(bbox.r1, bbox.r2 + 1):
+                for c in range(bbox.c1, bbox.c2 + 1):
+                    covered_cells.add((r, c))
+        for bbox in rejected_by_sheet.get(sheet_name, []):
+            for r in range(bbox.r1, bbox.r2 + 1):
+                for c in range(bbox.c1, bbox.c2 + 1):
+                    covered_cells.add((r, c))
+
+        uncovered = all_block_cells - covered_cells
+        # Cap uncovered cell list for large sheets
+        max_uncovered_listed = 500
+        uncovered_sample = sorted(uncovered)[:max_uncovered_listed] if uncovered else []
+
+        coverage[sheet_name] = {
+            "total_block_cells": len(all_block_cells),
+            "covered_cells": len(covered_cells),
+            "uncovered_cells": len(uncovered),
+            "final_candidate_count": len(finals_by_sheet.get(sheet_name, [])),
+            "rejected_block_count": len(rejected_by_sheet.get(sheet_name, [])),
+            "uncovered_sample": uncovered_sample if len(uncovered) <= max_uncovered_listed else uncovered_sample,
+            "uncovered_capped": len(uncovered) > max_uncovered_listed,
+        }
+
+    report_path = os.path.join(output_dir, "coverage_report.json")
+    with open(report_path, "w", encoding="utf-8") as f:
+        json.dump(coverage, f, indent=2, default=str)

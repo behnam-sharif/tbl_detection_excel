@@ -64,6 +64,11 @@ class SheetAccessor:
     def merged_cell_coords(self) -> frozenset:
         return self._merged_coords
 
+    @property
+    def merged_ranges(self):
+        """Return list of merge range objects with min_row/min_col/max_row/max_col (1-indexed)."""
+        return list(self._ws_formulas.merged_cells.ranges)
+
     # --- Cell access (all 1-indexed) ---
 
     def get_cell_value(self, row: int, col: int) -> Any:

@@ -16,9 +16,9 @@ from typing import List, Tuple, Dict, Optional
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 
-from parse_tools.models import BBox, BlockCandidate, BlockFeatures, TableDecision, Config, QCEvent, FinalCandidate, SheetResult
+from parse_tools.models import BBox, BlockCandidate, BlockFeatures, TableDecision, Config, QCEvent, FinalCandidate, SheetResult, RejectedBlock
 from parse_tools.sheet_accessor import SheetAccessor
-from parse_tools.presence import get_presence_matrix_from_accessor
+from parse_tools.presence import get_presence_matrix_from_accessor, inflate_presence_for_merges
 from parse_tools.feature_extraction import classify_block_cells, compute_block_features
 from block_generation import generate_block_candidates
 from table_framing_heuristics import run_framing_pipeline
@@ -107,6 +107,11 @@ def process_single_sheet(
             # Build presence matrix
             presence = get_presence_matrix_from_accessor(accessor)
 
+            # Part A: Inflate presence for merged cells
+            cfg = config or Config()
+            if cfg.merge_inflate_presence:
+                presence = inflate_presence_for_merges(presence, accessor, cfg)
+
             # Generate block candidates
             t1 = time.perf_counter()
             candidates = generate_block_candidates(
@@ -135,6 +140,20 @@ def process_single_sheet(
                 config=config,
             )
 
+            # Part H: Collect rejected blocks from framing
+            rejected_blocks: list[RejectedBlock] = []
+            for block, decision in results:
+                if decision.action == "reject":
+                    rejected_blocks.append(RejectedBlock(
+                        sheet_name=sheet_name,
+                        bbox=block.bbox,
+                        rejection_stage="framing",
+                        reason_codes=[decision.rationale],
+                        provenance=block.provenance,
+                        n_cells_on=block.n_cells_on,
+                        density=block.density,
+                    ))
+
             # Grammar-based splitting
             t3 = time.perf_counter()
             results, cut_candidates = run_grammar_splitting(
@@ -162,6 +181,29 @@ def process_single_sheet(
                 logger.info("Sheet '%s': QC gate produced %d events in %dms",
                     sheet_name, len(qc_events), int((t6 - t5) * 1000))
 
+            # Part H: Collect rejected blocks from QC gate
+            for block, decision in results:
+                if decision.action == "reject":
+                    # Determine rejection stage from rationale
+                    rationale = decision.rationale or ""
+                    if "qc_reject:" in rationale:
+                        stage = "qc_fast_filter"
+                    elif "qc_merge" in (block.provenance or ""):
+                        stage = "qc_merge"
+                    elif "qc" in rationale.lower():
+                        stage = "qc_refinement"
+                    else:
+                        stage = "qc_fast_filter"
+                    rejected_blocks.append(RejectedBlock(
+                        sheet_name=sheet_name,
+                        bbox=block.bbox,
+                        rejection_stage=stage,
+                        reason_codes=[rationale],
+                        provenance=block.provenance,
+                        n_cells_on=block.n_cells_on,
+                        density=block.density,
+                    ))
+
             # Build final candidates
             t7 = time.perf_counter()
             final_cands = build_final_candidates(
@@ -171,6 +213,31 @@ def process_single_sheet(
             t8 = time.perf_counter()
             logger.info("Sheet '%s': %d final candidates in %dms",
                 sheet_name, len(final_cands), int((t8 - t7) * 1000))
+
+            # Part H: Silent-drop audit — blocks that entered QC but are neither
+            # in final candidates nor in rejected_blocks
+            final_bboxes = {(fc.bbox.r1, fc.bbox.c1, fc.bbox.r2, fc.bbox.c2) for fc in final_cands}
+            rejected_bboxes = {(rb.bbox.r1, rb.bbox.c1, rb.bbox.r2, rb.bbox.c2) for rb in rejected_blocks}
+            for block, decision in results:
+                bkey = (block.bbox.r1, block.bbox.c1, block.bbox.r2, block.bbox.c2)
+                if bkey not in final_bboxes and bkey not in rejected_bboxes:
+                    if decision.action in ("keep", "shrink") and decision.final_bbox is not None:
+                        fbkey = (decision.final_bbox.r1, decision.final_bbox.c1,
+                                 decision.final_bbox.r2, decision.final_bbox.c2)
+                        if fbkey not in final_bboxes and fbkey not in rejected_bboxes:
+                            rejected_blocks.append(RejectedBlock(
+                                sheet_name=sheet_name,
+                                bbox=block.bbox,
+                                rejection_stage="audit_gap",
+                                reason_codes=["untracked_drop"],
+                                provenance=block.provenance,
+                                n_cells_on=block.n_cells_on,
+                                density=block.density,
+                            ))
+
+            # Cap rejected blocks per sheet
+            if len(rejected_blocks) > cfg.max_rejected_per_sheet:
+                rejected_blocks = rejected_blocks[:cfg.max_rejected_per_sheet]
 
             # Pre-compute training rows (while accessor is open)
             training_rows = []
@@ -225,6 +292,7 @@ def process_single_sheet(
                 qc_events=qc_events,
                 cut_candidates=cut_candidates,
                 training_rows=training_rows,
+                rejected_blocks=rejected_blocks,
             )
 
     except Exception as e:

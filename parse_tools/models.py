@@ -122,7 +122,14 @@ class Config:
     cp_min_shift: float = 0.30
     cp_label_col_max: int = 2
 
+    # Grammar — blank-row-only mode (when True: row separators with row_density <= epsilon only;
+    # no column / header-restart / changepoint cuts)
+    grammar_only_blank_row_separators: bool = True
+    grammar_separator_row_epsilon: float = 0.0  # fully blank rows only when 0.0
+
     # Grammar — split constraints
+    # False: do not apply grammar sub-splits; cut candidates are still computed for cut_scores.jsonl
+    grammar_split_enabled: bool = True
     max_splits_per_block: int = 5
     min_sub_block_height: int = 2
     min_sub_block_width: int = 2

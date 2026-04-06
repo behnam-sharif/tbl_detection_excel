@@ -91,7 +91,7 @@ def process_single_sheet(
     """
     Full pipeline for one sheet:
       SheetAccessor -> presence matrix -> generate_block_candidates
-      -> run_framing_pipeline -> grammar splitting -> QC gate -> final candidates
+      -> run_framing_pipeline -> [optional grammar splitting] -> QC gate -> final candidates
 
     Catches exceptions -> logs warning -> returns empty SheetResult.
     """
@@ -137,7 +137,7 @@ def process_single_sheet(
                 base_row=1,
                 base_col=1,
                 max_passes=max_framing_passes,
-                config=config,
+                config=cfg,
             )
 
             # Part H: Collect rejected blocks from framing
@@ -154,26 +154,39 @@ def process_single_sheet(
                         density=block.density,
                     ))
 
-            # Grammar-based splitting
+            # Grammar cut detection (always); sub-block application optional (grammar_split_enabled)
             t3 = time.perf_counter()
             results, cut_candidates = run_grammar_splitting(
-                results, accessor, presence, config=config,
-                base_row=1, base_col=1,
+                results,
+                accessor,
+                presence,
+                config=cfg,
+                base_row=1,
+                base_col=1,
+                apply_splits=cfg.grammar_split_enabled,
             )
             t4 = time.perf_counter()
             grammar_splits = sum(
-                1 for _, d in results if "+grammar_split" in (d.metadata.get("provenance", ""))
+                1
+                for _, d in results
+                if "+grammar_split" in (d.metadata.get("provenance", ""))
             )
-            if grammar_splits:
+            if cfg.grammar_split_enabled and grammar_splits:
                 logger.info(
                     "Sheet '%s': grammar splitting produced %d new sub-blocks in %dms",
                     sheet_name, grammar_splits, int((t4 - t3) * 1000),
+                )
+            elif not cfg.grammar_split_enabled:
+                n_cut_blocks = len(cut_candidates)
+                logger.info(
+                    "Sheet '%s': grammar splits disabled; cut scores for %d block(s) in %dms",
+                    sheet_name, n_cut_blocks, int((t4 - t3) * 1000),
                 )
 
             # Post-split QC gate
             t5 = time.perf_counter()
             results, qc_events = run_post_split_qc_gate(
-                results, accessor, presence, config=config,
+                results, accessor, presence, config=cfg,
                 base_row=1, base_col=1,
             )
             t6 = time.perf_counter()
@@ -207,7 +220,7 @@ def process_single_sheet(
             # Build final candidates
             t7 = time.perf_counter()
             final_cands = build_final_candidates(
-                results, accessor, presence, config=config,
+                results, accessor, presence, config=cfg,
                 base_row=1, base_col=1,
             )
             t8 = time.perf_counter()

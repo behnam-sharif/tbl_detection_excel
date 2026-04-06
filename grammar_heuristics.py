@@ -30,9 +30,14 @@ def run_grammar_splitting(
     config: Optional[Config] = None,
     base_row: int = 1,
     base_col: int = 1,
+    apply_splits: bool = True,
 ) -> Tuple[List[Tuple[BlockCandidate, TableDecision]], Dict[str, List[CutCandidate]]]:
     """
-    Iterate over kept/shrunk blocks, attempt grammar-based splitting.
+    Iterate over kept/shrunk blocks, run grammar cut detection on each.
+
+    When apply_splits is True, blocks may be replaced by grammar sub-blocks.
+    When False, bboxes are unchanged but cut candidates are still collected
+    (for cut_scores.jsonl / downstream xl_kg).
 
     Returns:
         (new_results, all_cut_candidates_by_bbox_str)
@@ -69,7 +74,7 @@ def run_grammar_splitting(
             )
             all_cuts[bbox_key] = candidates
 
-            if len(sub_blocks) > 1:
+            if apply_splits and len(sub_blocks) > 1:
                 for sb in sub_blocks:
                     sb_grid = classify_block_cells(
                         accessor, sb.bbox, base_row=base_row, base_col=base_col
@@ -113,13 +118,12 @@ def _try_grammar_split(
     """
     candidates: List[CutCandidate] = []
 
-    # Row-axis detection
+    # Row-axis: blank separators only, or full grammar (separator + header + changepoint + col)
     candidates.extend(_detect_separator_rows(features, cfg))
-    candidates.extend(_detect_header_restarts(features, cell_grid, cfg))
-    candidates.extend(_detect_changepoints(features, cell_grid, cfg))
-
-    # Column-axis detection
-    candidates.extend(_detect_separator_cols(features, cfg))
+    if not cfg.grammar_only_blank_row_separators:
+        candidates.extend(_detect_header_restarts(features, cell_grid, cfg))
+        candidates.extend(_detect_changepoints(features, cell_grid, cfg))
+        candidates.extend(_detect_separator_cols(features, cfg))
 
     if not candidates:
         return [block], candidates
@@ -186,12 +190,16 @@ def _detect_separator_rows(features: BlockFeatures, cfg: Config) -> List[CutCand
         return candidates
 
     for i in range(1, height - 1):  # skip first/last row
-        if features.row_density[i] <= cfg.sep_max_density:
-            # Score: lower density = higher confidence
-            score = 1.0 - features.row_density[i]
-            candidates.append(CutCandidate(
-                index=i, axis="row", separator_score=score,
-            ))
+        rd = features.row_density[i]
+        if cfg.grammar_only_blank_row_separators:
+            if rd > cfg.grammar_separator_row_epsilon:
+                continue
+        elif rd > cfg.sep_max_density:
+            continue
+        score = 1.0 - rd
+        candidates.append(CutCandidate(
+            index=i, axis="row", separator_score=score,
+        ))
 
     return candidates
 

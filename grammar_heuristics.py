@@ -1,8 +1,11 @@
 """
 grammar_heuristics.py — Multi-table splitting via structural signal detection.
 
-Detects boundaries between stacked tables within a single block using three
+Detects boundaries between stacked tables within a single block using four
 strategies: separator rows/cols, header restarts, and type change-points.
+All strategies contribute to cut_scores export; bbox splitting is optional
+(grammar_split_enabled) and may use only blank-row separators when
+grammar_only_blank_row_separators is True.
 """
 
 from __future__ import annotations
@@ -70,7 +73,12 @@ def run_grammar_splitting(
             features = compute_block_features(cell_grid)
 
             sub_blocks, candidates = _try_grammar_split(
-                work_block, cell_grid, features, presence_matrix, cfg
+                work_block,
+                cell_grid,
+                features,
+                presence_matrix,
+                cfg,
+                apply_splits=apply_splits,
             )
             all_cuts[bbox_key] = candidates
 
@@ -111,19 +119,20 @@ def _try_grammar_split(
     features: BlockFeatures,
     presence_matrix: List[List[int]],
     cfg: Config,
+    apply_splits: bool = True,
 ) -> Tuple[List[BlockCandidate], List[CutCandidate]]:
     """
-    Gather cut candidates from 3 strategies, select best cuts, apply splits.
-    Returns (sub_blocks, all_candidates).
+    Gather cut candidates from all strategies, merge for cut_scores export.
+    When apply_splits is True, select cuts and split the bbox (subject to
+    grammar_only_blank_row_separators for which cuts may be applied).
+    Returns (sub_blocks, merged_candidates_for_export).
     """
     candidates: List[CutCandidate] = []
 
-    # Row-axis: blank separators only, or full grammar (separator + header + changepoint + col)
     candidates.extend(_detect_separator_rows(features, cfg))
-    if not cfg.grammar_only_blank_row_separators:
-        candidates.extend(_detect_header_restarts(features, cell_grid, cfg))
-        candidates.extend(_detect_changepoints(features, cell_grid, cfg))
-        candidates.extend(_detect_separator_cols(features, cfg))
+    candidates.extend(_detect_header_restarts(features, cell_grid, cfg))
+    candidates.extend(_detect_changepoints(features, cell_grid, cfg))
+    candidates.extend(_detect_separator_cols(features, cfg))
 
     if not candidates:
         return [block], candidates
@@ -135,7 +144,11 @@ def _try_grammar_split(
     for c in merged:
         c.combined_score = max(c.separator_score, c.header_restart_score, c.changepoint_score)
 
-    selected = _select_cuts(merged, cfg.max_splits_per_block)
+    if not apply_splits:
+        return [block], merged
+
+    apply_pool = _merge_candidates_for_apply(merged, features, cfg)
+    selected = _select_cuts(apply_pool, cfg.max_splits_per_block)
     if not selected:
         return [block], merged
 
@@ -178,12 +191,35 @@ def _merge_candidates(candidates: List[CutCandidate]) -> List[CutCandidate]:
     return list(key_map.values())
 
 
+def _merge_candidates_for_apply(
+    merged: List[CutCandidate],
+    features: BlockFeatures,
+    cfg: Config,
+) -> List[CutCandidate]:
+    """
+    When grammar_only_blank_row_separators is True, only row cuts on rows with
+    row_density <= epsilon may be applied (no column cuts). Otherwise use full merged list.
+    """
+    if not cfg.grammar_only_blank_row_separators:
+        return merged
+    rd = features.row_density
+    out: List[CutCandidate] = []
+    for c in merged:
+        if c.axis == "col":
+            continue
+        if c.index < 0 or c.index >= len(rd):
+            continue
+        if rd[c.index] <= cfg.grammar_separator_row_epsilon:
+            out.append(c)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Detection strategies
 # ---------------------------------------------------------------------------
 
 def _detect_separator_rows(features: BlockFeatures, cfg: Config) -> List[CutCandidate]:
-    """Detect near-empty rows that separate tables vertically."""
+    """Detect near-empty rows that separate tables vertically (sep_max_density)."""
     candidates: List[CutCandidate] = []
     height = len(features.row_density)
     if height < 3:
@@ -191,10 +227,7 @@ def _detect_separator_rows(features: BlockFeatures, cfg: Config) -> List[CutCand
 
     for i in range(1, height - 1):  # skip first/last row
         rd = features.row_density[i]
-        if cfg.grammar_only_blank_row_separators:
-            if rd > cfg.grammar_separator_row_epsilon:
-                continue
-        elif rd > cfg.sep_max_density:
+        if rd > cfg.sep_max_density:
             continue
         score = 1.0 - rd
         candidates.append(CutCandidate(

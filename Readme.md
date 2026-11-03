@@ -1,6 +1,10 @@
-# xl_parse
+# tbl_detection_excel
 
 Excel table detection and parsing: identify and extract table boundaries from spreadsheets using a multi-stage heuristic pipeline. Handles complex layouts with multiple tables per sheet. Output is suitable for downstream ML/LLM use.
+
+`tbl_detection_excel` (formerly `xl_parse`) is a **structural parsing approach** to detecting tables. It reasons about the layout of a sheet (which cells are filled, their types and styles, borders, blank separator rows and columns, header restarts) rather than about cell values, and it needs no LLM. The grammar rules that drive the table splitting are described in the XLGEN docs:
+
+> **https://docs.benadyconsults.com/xlgen/xl-grammar/**
 
 ## Pipeline overview
 
@@ -10,7 +14,7 @@ The pipeline runs **per sheet** and produces final table candidates (bounding bo
 
 ## Project Overview
 
-xl_parse is an Excel table detection and parsing system. It identifies and extracts table boundaries from spreadsheets using a multi-stage heuristic pipeline, handling complex layouts with multiple tables per sheet.
+tbl_detection_excel is an Excel table detection and parsing system. It identifies and extracts table boundaries from spreadsheets using a multi-stage heuristic pipeline, handling complex layouts with multiple tables per sheet.
 
 ## Per-sheet pipeline summary (parallelized)
 
